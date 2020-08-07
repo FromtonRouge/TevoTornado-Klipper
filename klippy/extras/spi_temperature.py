@@ -5,7 +5,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
-import bus
+from . import bus
 
 
 ######################################################################
@@ -336,6 +336,6 @@ Sensors = {
 
 def load_config(config):
     # Register sensors
-    pheater = config.get_printer().lookup_object("heater")
+    pheaters = config.get_printer().load_object(config, "heaters")
     for name, klass in Sensors.items():
-        pheater.add_sensor_factory(name, klass)
+        pheaters.add_sensor_factory(name, klass)

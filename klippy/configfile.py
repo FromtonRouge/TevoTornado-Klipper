@@ -3,15 +3,15 @@
 # Copyright (C) 2016-2018  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, glob, re, time, logging, ConfigParser, StringIO
+import os, glob, re, time, logging, ConfigParser as configparser, StringIO
 
-error = ConfigParser.Error
+error = configparser.Error
 
 class sentinel:
     pass
 
 class ConfigWrapper:
-    error = ConfigParser.Error
+    error = configparser.Error
     def __init__(self, printer, fileconfig, access_tracking, section):
         self.printer = printer
         self.fileconfig = fileconfig
@@ -21,12 +21,13 @@ class ConfigWrapper:
         return self.printer
     def get_name(self):
         return self.section
-    def _get_wrapper(self, parser, option, default,
-                     minval=None, maxval=None, above=None, below=None):
+    def _get_wrapper(self, parser, option, default, minval=None, maxval=None,
+                     above=None, below=None, note_valid=True):
         if (default is not sentinel
             and not self.fileconfig.has_option(self.section, option)):
             return default
-        self.access_tracking[(self.section.lower(), option.lower())] = 1
+        if note_valid:
+            self.access_tracking[(self.section.lower(), option.lower())] = 1
         try:
             v = parser(self.section, option)
         except self.error as e:
@@ -49,19 +50,23 @@ class ConfigWrapper:
             raise self.error("Option '%s' in section '%s' must be below %s" % (
                 option, self.section, below))
         return v
-    def get(self, option, default=sentinel):
-        return self._get_wrapper(self.fileconfig.get, option, default)
-    def getint(self, option, default=sentinel, minval=None, maxval=None):
-        return self._get_wrapper(
-            self.fileconfig.getint, option, default, minval, maxval)
-    def getfloat(self, option, default=sentinel,
-                 minval=None, maxval=None, above=None, below=None):
+    def get(self, option, default=sentinel, note_valid=True):
+        return self._get_wrapper(self.fileconfig.get, option, default,
+                                 note_valid=note_valid)
+    def getint(self, option, default=sentinel, minval=None, maxval=None,
+               note_valid=True):
+        return self._get_wrapper(self.fileconfig.getint, option, default,
+                                 minval, maxval, note_valid=note_valid)
+    def getfloat(self, option, default=sentinel, minval=None, maxval=None,
+                 above=None, below=None, note_valid=True):
         return self._get_wrapper(self.fileconfig.getfloat, option, default,
-                                 minval, maxval, above, below)
-    def getboolean(self, option, default=sentinel):
-        return self._get_wrapper(self.fileconfig.getboolean, option, default)
-    def getchoice(self, option, choices, default=sentinel):
-        c = self.get(option, default)
+                                 minval, maxval, above, below,
+                                 note_valid=note_valid)
+    def getboolean(self, option, default=sentinel, note_valid=True):
+        return self._get_wrapper(self.fileconfig.getboolean, option, default,
+                                 note_valid=note_valid)
+    def getchoice(self, option, choices, default=sentinel, note_valid=True):
+        c = self.get(option, default, note_valid=note_valid)
         if c not in choices:
             raise error("Choice '%s' for option '%s' in section '%s'"
                         " is not a valid choice" % (c, option, self.section))
@@ -88,9 +93,12 @@ class PrinterConfig:
     def __init__(self, printer):
         self.printer = printer
         self.autosave = None
+        self.status_info = {}
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command("SAVE_CONFIG", self.cmd_SAVE_CONFIG,
                                desc=self.cmd_SAVE_CONFIG_help)
+    def get_printer(self):
+        return self.printer
     def _read_config_file(self, filename):
         try:
             f = open(filename, 'rb')
@@ -186,7 +194,7 @@ class PrinterConfig:
             if pos >= 0:
                 line = line[:pos]
             # Process include or buffer line
-            mo = ConfigParser.RawConfigParser.SECTCRE.match(line)
+            mo = configparser.RawConfigParser.SECTCRE.match(line)
             header = mo and mo.group('header')
             if header and header.startswith('include '):
                 self._parse_config_buffer(buffer, filename, fileconfig)
@@ -198,7 +206,7 @@ class PrinterConfig:
         self._parse_config_buffer(buffer, filename, fileconfig)
         visited.remove(path)
     def _build_config_wrapper(self, data, filename):
-        fileconfig = ConfigParser.RawConfigParser()
+        fileconfig = configparser.RawConfigParser()
         self._parse_config(data, filename, fileconfig, set())
         return ConfigWrapper(self.printer, fileconfig, {}, 'printer')
     def _build_config_string(self, config):
@@ -215,9 +223,9 @@ class PrinterConfig:
         regular_config = self._build_config_wrapper(regular_data, filename)
         autosave_data = self._strip_duplicates(autosave_data, regular_config)
         self.autosave = self._build_config_wrapper(autosave_data, filename)
-        self._config = self._build_config_wrapper(regular_data + autosave_data,
-                                                  filename)
-        return self._config
+        cfg = self._build_config_wrapper(regular_data + autosave_data, filename)
+        self._build_status(cfg)
+        return cfg
     def check_unused_options(self, config):
         fileconfig = config.fileconfig
         objects = dict(self.printer.lookup_objects())
@@ -243,6 +251,15 @@ class PrinterConfig:
                  self._build_config_string(config),
                  "======================="]
         self.printer.set_rollover_info("config", "\n".join(lines))
+    # Status reporting
+    def _build_status(self, config):
+        self.status_info.clear()
+        for section in config.get_prefix_sections(''):
+            self.status_info[section.get_name()] = section_status = {}
+            for option in section.get_prefix_options(''):
+                section_status[option] = section.get(option, note_valid=False)
+    def get_status(self, eventtime):
+        return {'config': self.status_info}
     # Autosave functions
     def set(self, section, option, value):
         if not self.autosave.fileconfig.has_section(section):
@@ -261,7 +278,7 @@ class PrinterConfig:
                           "with included value" % (section, option)
                     raise gcode.error(msg)
     cmd_SAVE_CONFIG_help = "Overwrite config file and restart"
-    def cmd_SAVE_CONFIG(self, params):
+    def cmd_SAVE_CONFIG(self, gcmd):
         if not self.autosave.fileconfig.sections():
             return
         gcode = self.printer.lookup_object('gcode')

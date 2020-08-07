@@ -19,7 +19,8 @@ src-y += ../lib/lpc176x/device/system_LPC17xx.c
 src-$(CONFIG_HAVE_GPIO_ADC) += lpc176x/adc.c
 src-$(CONFIG_HAVE_GPIO_I2C) += lpc176x/i2c.c
 src-$(CONFIG_HAVE_GPIO_SPI) += lpc176x/spi.c
-src-$(CONFIG_USBSERIAL) += lpc176x/usbserial.c generic/usb_cdc.c
+src-$(CONFIG_USBSERIAL) += lpc176x/usbserial.c lpc176x/chipid.c
+src-$(CONFIG_USBSERIAL) += generic/usb_cdc.c
 src-$(CONFIG_SERIAL) += lpc176x/serial.c generic/serial_irq.c
 
 # Build the additional bin output file
@@ -32,4 +33,4 @@ $(OUT)klipper.bin: $(OUT)klipper.elf
 # Flash rules
 flash: $(OUT)klipper.bin
 	@echo "  Flashing $< to $(FLASH_DEVICE)"
-	$(Q)$(PYTHON) ./scripts/flash_usb.py -t lpc176x -d "$(FLASH_DEVICE)" $(if $(NOSUDO),--no-sudo) $(OUT)klipper.bin
+	$(Q)$(PYTHON) ./scripts/flash_usb.py -t $(CONFIG_MCU) -d "$(FLASH_DEVICE)" $(if $(NOSUDO),--no-sudo) $(OUT)klipper.bin

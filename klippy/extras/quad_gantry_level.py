@@ -4,7 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-import probe, z_tilt
+from . import probe, z_tilt
 
 class QuadGantryLevel:
     def __init__(self, config):
@@ -37,9 +37,9 @@ class QuadGantryLevel:
             desc=self.cmd_QUAD_GANTRY_LEVEL_help)
     cmd_QUAD_GANTRY_LEVEL_help = (
         "Conform a moving, twistable gantry to the shape of a stationary bed")
-    def cmd_QUAD_GANTRY_LEVEL(self, params):
-        self.retry_helper.start(params)
-        self.probe_helper.start_probe(params)
+    def cmd_QUAD_GANTRY_LEVEL(self, gcmd):
+        self.retry_helper.start(gcmd)
+        self.probe_helper.start_probe(gcmd)
     def probe_finalize(self, offsets, positions):
         # Mirror our perspective so the adjustments make sense
         # from the perspective of the gantry
@@ -84,11 +84,10 @@ class QuadGantryLevel:
 
         adjust_max = max(z_adjust)
         if adjust_max > self.max_adjust:
-            self.gcode.respond_error(
-                "Aborting quad_gantry_level " +
-                "required adjustment %0.6f " % ( adjust_max ) +
-                "is greater than max_adjust %0.6f" % (self.max_adjust))
-            return
+            raise self.gcode.error("Aborting quad_gantry_level"
+                                   " required adjustment %0.6f"
+                                   " is greater than max_adjust %0.6f"
+                                   % (adjust_max, self.max_adjust))
 
         speed = self.probe_helper.get_lift_speed()
         self.z_helper.adjust_steppers(z_adjust, speed)

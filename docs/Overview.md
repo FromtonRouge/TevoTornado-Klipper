@@ -29,6 +29,8 @@ communication with the Klipper developers.
     similar).
   - [Endstop phase](Endstop_Phase.md): Stepper assisted Z endstop
     positioning.
+- [Resonance compensation](Resonance_Compensation.md): A tool to
+  reduce ringing in prints.
 - [Pressure advance](Pressure_Advance.md): Calibrate extruder
   pressure.
 - [Slicers](Slicers.md): Configure "slicer" software for Klipper.
@@ -60,12 +62,13 @@ communication with the Klipper developers.
 
 # Device Specific Documents
 
-- [Bootloaders](Bootloaders.md): Developer information on
-  micro-controller flashing.
-- [stm32f1](stm32f1.md): Information on the STM32F1 micro-controller
-  port.
+- [Raspberry Pi as Micro-controller](RPi_microcontroller.md): Details
+  for controlling devices wired to the GPIO pins of a Raspberry Pi.
 - [Beaglebone](beaglebone.md): Details for running Klipper on the
   Beaglebone PRU.
+- [Bootloaders](Bootloaders.md): Developer information on
+  micro-controller flashing.
 - [stm32f0](stm32f0_CAN.md): Information on the STM32F0 micro-controller
   port.
 - [TSL1401CL filament width sensor](TSL1401CL_Filament_Width_Sensor.md)
+- [Hall filament width sensor](HallFilamentWidthSensor.md)

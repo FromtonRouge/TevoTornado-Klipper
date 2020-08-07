@@ -4,7 +4,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-import probe, mathutil
+import mathutil
+from . import probe
 
 class BedTilt:
     def __init__(self, config):
@@ -51,8 +52,8 @@ class BedTiltCalibrate:
             'BED_TILT_CALIBRATE', self.cmd_BED_TILT_CALIBRATE,
             desc=self.cmd_BED_TILT_CALIBRATE_help)
     cmd_BED_TILT_CALIBRATE_help = "Bed tilt calibration script"
-    def cmd_BED_TILT_CALIBRATE(self, params):
-        self.probe_helper.start_probe(params)
+    def cmd_BED_TILT_CALIBRATE(self, gcmd):
+        self.probe_helper.start_probe(gcmd)
     def probe_finalize(self, offsets, positions):
         # Setup for coordinate descent analysis
         z_offset = offsets[2]

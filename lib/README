@@ -38,14 +38,17 @@ Contents taken from the targets/TARGET_NXP/TARGET_LPC176X/ directory.
 It has been modified to set the appropriate clock speeds on the
 LPC1768 and LPC1769. See lpc176x.patch for the modifications.
 
-The cmsis-stm32f0 and the hal-stm32f0 directories contain code from
-STMicroelectronics:
-  http://www.st.com/en/embedded-software/stm32cubef0.html
-version 1.9.0 (extracted 20190116).
+The stm32f0 directory contains code from STMicroelectronics:
+  http://www.st.com/en/embedded-software/stm32cubef1.html
+version 1.10.0 (extracted 20190721).
 
 The stm32f1 directory contains code from STMicroelectronics:
   http://www.st.com/en/embedded-software/stm32cubef1.html
 version 1.8.0 (extracted 20190721).
+
+The stm32f2 directory contains code from STMicroelectronics:
+  https://www.st.com/content/st_com/en/products/embedded-software/mcu-mpu-embedded-software/stm32-embedded-software/stm32cube-mcu-mpu-packages/stm32cubef2.html
+version 1.9.0 (extracted 20200614).
 
 The stm32f4 directory contains code from STMicroelectronics:
   http://www.st.com/en/embedded-software/stm32cubef4.html
@@ -58,6 +61,12 @@ revision 42095e522859059e8a5f4ec05c1e3def01a870a9.
 The bossac directory contains code from:
   https://github.com/shumatech/BOSSA
 version 1.9 (b176eeef918fc810045c832348590595120187b4).
+
+The hidflash directory contains code from:
+  https://github.com/Serasidis/STM32_HID_Bootloader
+version 2.2.2 (2ab7927a27b7b78ef730782ea5f9b5d2c8f34671). It has been
+modified to work with Klipper - see hidflash/README for the
+details. See changes.diff for the modifications.
 
 The pru_rpmsg directory contains code from:
   https://github.com/dinuxbg/pru-gcc-examples

@@ -62,6 +62,7 @@ stepper_load_next(struct stepper *s, uint32_t min_next_time)
 {
     struct stepper_move *m = s->first;
     if (!m) {
+        // There is no next move - the queue is empty
         if (s->interval - s->add < s->min_stop_interval
             && !(s->flags & SF_NO_NEXT_CHECK))
             shutdown("No next step");
@@ -69,6 +70,7 @@ stepper_load_next(struct stepper *s, uint32_t min_next_time)
         return SF_DONE;
     }
 
+    // Load next 'struct stepper_move' into 'struct stepper'
     s->next_step_time += m->interval;
     s->add = m->add;
     s->interval = m->interval + m->add;
@@ -91,6 +93,7 @@ stepper_load_next(struct stepper *s, uint32_t min_next_time)
         }
         s->count = (uint32_t)m->count * 2;
     }
+    // Add all steps to s->position (stepper_get_position() can calc mid-move)
     if (m->flags & MF_DIR) {
         s->position = -s->position + m->count;
         gpio_out_toggle_noirq(s->dir_pin);
@@ -151,9 +154,13 @@ stepper_event(struct timer *t)
         return stepper_event_nodelay(s);
 
     // Normal step code - schedule the unstep event
+    if (!CONFIG_HAVE_STRICT_TIMING)
+        gpio_out_toggle_noirq(s->step_pin);
     uint32_t step_delay = timer_from_us(CONFIG_STEP_DELAY);
     uint32_t min_next_time = timer_read_time() + step_delay;
-    gpio_out_toggle_noirq(s->step_pin);
+    if (CONFIG_HAVE_STRICT_TIMING)
+        // Toggling gpio after reading the time is a micro-optimization
+        gpio_out_toggle_noirq(s->step_pin);
     s->count--;
     if (likely(s->count & 1))
         // Schedule unstep event
@@ -274,10 +281,12 @@ static uint32_t
 stepper_get_position(struct stepper *s)
 {
     uint32_t position = s->position;
+    // If stepper is mid-move, subtract out steps not yet taken
     if (CONFIG_STEP_DELAY <= 0)
         position -= s->count;
     else
         position -= s->count / 2;
+    // The top bit of s->position is an optimized reverse direction flag
     if (position & 0x80000000)
         return -position;
     return position;

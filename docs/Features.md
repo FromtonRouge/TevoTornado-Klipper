@@ -83,7 +83,7 @@ Klipper supports many standard 3d printer features:
   probe or via manual probing.
 
 * Support for common temperature sensors (eg, common thermistors,
-  AD595, PT100, MAX6675, MAX31855, MAX31856, MAX31865). Custom
+  AD595, AD849x, PT100, MAX6675, MAX31855, MAX31856, MAX31865). Custom
   thermistors and custom analog temperature sensors can also be
   configured.
 
@@ -141,7 +141,7 @@ represent total number of steps per second on the micro-controller.
 | Smoothieboard (LPC1769)         | 661K              | 661K              |
 | Beaglebone PRU                  | 680K              | 680K              |
 | Duet2 Wifi/Eth (SAM4E8E)        | 686K              | 686K              |
-| Adafruit Metro M4 (SAMD51)      | 733K              | 694K              |
+| Adafruit Metro M4 (SAMD51)      | 761K              | 692K              |
 | BigTreeTech SKR Pro (STM32F407) | 922K              | 711K              |
 
 On AVR platforms, the highest achievable step rate is with just one

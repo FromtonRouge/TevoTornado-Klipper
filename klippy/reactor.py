@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, select, math, time, Queue
+import os, select, math, time, Queue as queue
 import greenlet
 import chelper, util
 
@@ -20,18 +20,19 @@ class ReactorCompletion:
     def __init__(self, reactor):
         self.reactor = reactor
         self.result = self.sentinel
-        self.waiting = None
+        self.waiting = []
     def test(self):
         return self.result is not self.sentinel
     def complete(self, result):
         self.result = result
-        if self.waiting is not None:
-            self.reactor.update_timer(self.waiting.timer, self.reactor.NOW)
+        for wait in self.waiting:
+            self.reactor.update_timer(wait.timer, self.reactor.NOW)
     def wait(self, waketime=_NEVER, waketime_result=None):
         if self.result is self.sentinel:
-            self.waiting = greenlet.getcurrent()
+            wait = greenlet.getcurrent()
+            self.waiting.append(wait)
             self.reactor.pause(waketime)
-            self.waiting = None
+            self.waiting.remove(wait)
             if self.result is self.sentinel:
                 return waketime_result
         return self.result
@@ -101,7 +102,7 @@ class SelectReactor:
         self._next_timer = self.NEVER
         # Callbacks
         self._pipe_fds = None
-        self._async_queue = Queue.Queue()
+        self._async_queue = queue.Queue()
         # File descriptors
         self._fds = []
         # Greenlets
@@ -169,7 +170,7 @@ class SelectReactor:
         while 1:
             try:
                 func, args = self._async_queue.get_nowait()
-            except Queue.Empty:
+            except queue.Empty:
                 break
             func(*args)
     def _setup_async_callbacks(self):

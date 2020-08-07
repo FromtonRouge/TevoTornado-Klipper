@@ -1,7 +1,6 @@
 These instructions assume the software will run on a Raspberry Pi
 computer in conjunction with OctoPrint. It is recommended that a
-Raspberry Pi 2 or Raspberry Pi 3 computer be used as the host machine
-(see the
+Raspberry Pi 2, 3, or 4 computer be used as the host machine (see the
 [FAQ](FAQ.md#can-i-run-klipper-on-something-other-than-a-raspberry-pi-3)
 for other machines).
 
@@ -18,7 +17,7 @@ Raspberry Pi computer. Use OctoPi v0.16.0 or later - see the
 [octopi releases](https://github.com/guysoft/OctoPi/releases) for
 release information. One should verify that OctoPi boots and that the
 OctoPrint web server works. After connecting to the OctoPrint web
-page, follow the prompt to upgrade OctoPrint to v1.3.11 or later.
+page, follow the prompt to upgrade OctoPrint to v1.3.12 or later.
 
 After installing OctoPi and upgrading OctoPrint, it will be necessary
 to ssh into the target machine to run a handful of system commands. If
