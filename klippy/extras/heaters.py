@@ -74,10 +74,10 @@ class Heater:
         pwm_time = read_time + self.pwm_delay
         self.next_pwm_time = pwm_time + 0.75 * MAX_HEAT_TIME
         self.last_pwm_value = value
-        logging.debug("%s: pwm=%.3f@%.3f (from %.3f@%.3f [%.3f])",
-                      self.name, value, pwm_time,
-                      self.last_temp, self.last_temp_time, self.target_temp)
         self.mcu_pwm.set_pwm(pwm_time, value)
+        #logging.debug("%s: pwm=%.3f@%.3f (from %.3f@%.3f [%.3f])",
+        #              self.name, value, pwm_time,
+        #              self.last_temp, self.last_temp_time, self.target_temp)
     def temperature_callback(self, read_time, temp):
         with self.lock:
             time_diff = read_time - self.last_temp_time
@@ -182,7 +182,9 @@ class ControlPID:
         self.min_deriv_time = heater.get_smooth_time()
         imax = config.getfloat('pid_integral_max', self.heater_max_power,
                                minval=0.)
-        self.temp_integ_max = imax / self.Ki
+        self.temp_integ_max = 0.
+        if self.Ki:
+            self.temp_integ_max = imax / self.Ki
         self.prev_temp = AMBIENT_TEMP
         self.prev_temp_time = 0.
         self.prev_temp_deriv = 0.
@@ -270,6 +272,7 @@ class PrinterHeaters:
                 "Unknown temperature sensor '%s'" % (sensor_type,))
         return self.sensor_factories[sensor_type](config)
     def register_sensor(self, config, psensor, gcode_id=None):
+        self.available_sensors.append(config.get_name())
         if gcode_id is None:
             gcode_id = config.get('gcode_id', None)
             if gcode_id is None:
@@ -278,7 +281,6 @@ class PrinterHeaters:
             raise self.printer.config_error(
                 "G-Code sensor id %s already registered" % (gcode_id,))
         self.gcode_id_to_sensor[gcode_id] = psensor
-        self.available_sensors.append(config.get_name())
     def get_status(self, eventtime):
         return {'available_heaters': self.available_heaters,
                 'available_sensors': self.available_sensors}

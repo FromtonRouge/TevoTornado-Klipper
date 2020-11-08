@@ -15,6 +15,7 @@
 #include "sched.h" // DECL_INIT
 #include <string.h>
 #include "can.h"
+#include <fasthash.h>
 
 #if (CONFIG_CAN_PINS_PA11_PA12)
 DECL_CONSTANT_STR("RESERVE_PINS_CAN", "PA11,PA12");
@@ -63,15 +64,15 @@ DECL_CONSTANT_STR("RESERVE_PINS_CAN", "PB12,PB13");
 
 #if (CONFIG_MACH_STM32F4)
 #warning CAN on STM32F4 is untested
-#if (CONFIG_CAN_PINS_PA11_PA12 ||
-     CONFIG_CAN_PINS_PB8_PB9 ||
+#if (CONFIG_CAN_PINS_PA11_PA12 || \
+     CONFIG_CAN_PINS_PB8_PB9 || \
      CONFIG_CAN_PINS_PI8_PH13)
 #define SOC_CAN CAN1
 #define CAN_RX0_IRQn  CAN1_RX0_IRQn
 #define CAN_RX1_IRQn  CAN1_RX1_IRQn
 #define CAN_TX_IRQn   CAN1_TX_IRQn
 #define CAN_SCE_IRQn  CAN1_SCE_IRQn
-#elsif ((CONFIG_CAN_PINS_PB5_PB6 || CONFIG_CAN_PINS_PB12_PB13)
+#elif ((CONFIG_CAN_PINS_PB5_PB6 || CONFIG_CAN_PINS_PB12_PB13)
 #define SOC_CAN CAN2
 #define CAN_RX0_IRQn  CAN2_RX0_IRQn
 #define CAN_RX1_IRQn  CAN2_RX1_IRQn
@@ -151,10 +152,8 @@ static void can_transmit(uint32_t id, uint32_t dlc, uint8_t *pkt)
 // Convert Unique 96-bit value into 48 bit representation
 static void pack_uuid(uint8_t* u)
 {
-    for(int i=0; i<SHORT_UUID_LEN; i++) {
-        u[i] = *((uint8_t*)(UID_BASE+i)) ^
-                *((uint8_t*)(UID_BASE+i+SHORT_UUID_LEN));
-    }
+    uint64_t hash = fasthash64((uint8_t*)UID_BASE, 12, 0xA16231A7);
+    memcpy(u, &hash, SHORT_UUID_LEN);
 }
 
 static void can_uuid_resp(void)
