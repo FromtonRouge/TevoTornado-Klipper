@@ -4,7 +4,7 @@
 # Copyright (C) 2020  Janar Sööt <janar.soot@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, logging
+import os, logging, ast, re
 from string import Template
 from . import menu_keys
 
@@ -17,46 +17,43 @@ class error(Exception):
     pass
 
 
-class MenuConfig(dict):
-    """Wrapper for dict to emulate configfile get_name for namespace.
-        __ns - item namespace key, used in item relative paths
-        $__id - generated id text variable
-    """
-    def get_name(self):
-        __id = '__menu_' + hex(id(self)).lstrip("0x").rstrip("L")
-        return Template('menu ' + self.get(
-            '__ns', __id)).safe_substitute(__id=__id)
-
-    def get_prefix_options(self, prefix):
-        return [o for o in self.keys() if o.startswith(prefix)]
-
-
 # Scriptable menu element abstract baseclass
 class MenuElement(object):
-    def __init__(self, manager, config):
+    def __init__(self, manager, config, **kwargs):
         if type(self) is MenuElement:
             raise error(
                 'Abstract MenuElement cannot be instantiated directly')
         self._manager = manager
-        self.cursor = '>'
-        # scroll is always on
-        self._scroll = True
-        self._index = manager.asint(config.get('index', ''), None)
-        self._enable_tpl = manager.gcode_macro.load_template(
-            config, 'enable', 'True')
-        self._name_tpl = manager.gcode_macro.load_template(
-            config, 'name')
-        # item namespace - used in relative paths
-        self._ns = str(" ".join(config.get_name().split(' ')[1:])).strip()
+        self._cursor = '>'
+        # set class defaults and attributes from arguments
+        self._index = kwargs.get('index', None)
+        self._enable = kwargs.get('enable', True)
+        self._name = kwargs.get('name', None)
+        self._enable_tpl = self._name_tpl = None
+        if config is not None:
+            # overwrite class attributes from config
+            self._index = config.getint('index', self._index)
+            self._name_tpl = manager.gcode_macro.load_template(
+                config, 'name', self._name)
+            try:
+                self._enable = config.getboolean('enable', self._enable)
+            except config.error:
+                self._enable_tpl = manager.gcode_macro.load_template(
+                    config, 'enable')
+            # item namespace - used in relative paths
+            self._ns = str(" ".join(config.get_name().split(' ')[1:])).strip()
+        else:
+            # ns - item namespace key, used in item relative paths
+            # $__id - generated id text variable
+            __id = '__menu_' + hex(id(self)).lstrip("0x").rstrip("L")
+            self._ns = Template(
+                'menu ' + kwargs.get('ns', __id)).safe_substitute(__id=__id)
         self._last_heartbeat = None
-        self.__scroll_offs = 0
-        self.__scroll_diff = 0
-        self.__scroll_dir = None
-        self.__last_state = True
-        # display width is used and adjusted by cursor size
-        self._width = self.manager.cols - len(self._cursor)
+        self.__scroll_pos = None
+        self.__scroll_request_pending = False
+        self.__scroll_next = 0
         # menu scripts
-        self._script_tpls = {}
+        self._scripts = {}
         # init
         self.init()
 
@@ -64,26 +61,24 @@ class MenuElement(object):
     def init(self):
         pass
 
-    def _name(self):
-        context = self.get_context()
-        return self.manager.asflat(self._name_tpl.render(context))
+    def _render_name(self):
+        if self._name_tpl is not None:
+            context = self.get_context()
+            return self.manager.asflat(self._name_tpl.render(context))
+        return self.manager.asflat(self._name)
 
-    def _load_scripts(self, config, *args, **kwargs):
-        """Load script(s) from config"""
-
-        prefix = kwargs.get('prefix', '')
-        for arg in args:
-            name = arg[len(prefix):]
-            if name in self._script_tpls:
-                logging.info(
-                    "Declaration of '%s' hides "
-                    "previous script declaration" % (name,))
-            self._script_tpls[name] = self.manager.gcode_macro.load_template(
-                config, arg, '')
-
-    # override
-    def _second_tick(self, eventtime):
-        pass
+    def _load_script(self, config, name, option=None):
+        """Load script template from config or callback from dict"""
+        if name in self._scripts:
+            logging.info(
+                "Declaration of '%s' hides "
+                "previous script declaration" % (name,))
+        option = option or name
+        if isinstance(config, dict):
+            self._scripts[name] = config.get(option, None)
+        else:
+            self._scripts[name] = self.manager.gcode_macro.load_template(
+                config, option, '')
 
     # override
     def is_editing(self):
@@ -95,7 +90,8 @@ class MenuElement(object):
 
     # override
     def is_enabled(self):
-        return self.eval_enable()
+        context = self.get_context()
+        return self.eval_enable(context)
 
     # override
     def start_editing(self):
@@ -110,75 +106,67 @@ class MenuElement(object):
         # get default menu context
         context = self.manager.get_context(cxt)
         context['menu'].update({
-            'width': self._width,
             'ns': self.get_ns()
         })
         return context
 
-    def eval_enable(self):
-        context = self.get_context()
-        return self.manager.asbool(self._enable_tpl.render(context))
+    def eval_enable(self, context):
+        if self._enable_tpl is not None:
+            return bool(ast.literal_eval(self._enable_tpl.render(context)))
+        return bool(self._enable)
 
     # Called when a item is selected
     def select(self):
-        self.__clear_scroll()
+        self.__reset_scroller()
 
     def heartbeat(self, eventtime):
         self._last_heartbeat = eventtime
-        state = bool(int(eventtime) & 1)
-        if self.__last_state ^ state:
-            self.__last_state = state
+        if eventtime >= self.__scroll_next:
+            self.__scroll_next = eventtime + 0.5
             if not self.is_editing():
-                self._second_tick(eventtime)
-                self.__update_scroll(eventtime)
+                self.__update_scroller()
 
-    def __clear_scroll(self):
-        self.__scroll_dir = None
-        self.__scroll_diff = 0
-        self.__scroll_offs = 0
+    def __update_scroller(self):
+        if self.__scroll_pos is None and self.__scroll_request_pending is True:
+            self.__scroll_pos = 0
+        elif self.__scroll_request_pending is True:
+            self.__scroll_pos += 1
+            self.__scroll_request_pending = False
+        elif self.__scroll_request_pending is False:
+            pass  # hold scroll position
+        elif self.__scroll_request_pending is None:
+            self.__reset_scroller()
 
-    def __update_scroll(self, eventtime):
-        if self.__scroll_dir == 0 and self.__scroll_diff > 0:
-            self.__scroll_dir = 1
-            self.__scroll_offs = 0
-        elif self.__scroll_dir and self.__scroll_diff > 0:
-            self.__scroll_offs += self.__scroll_dir
-            if self.__scroll_offs >= self.__scroll_diff:
-                self.__scroll_dir = -1
-            elif self.__scroll_offs <= 0:
-                self.__scroll_dir = 1
-        else:
-            self.__clear_scroll()
+    def __reset_scroller(self):
+        self.__scroll_pos = None
+        self.__scroll_request_pending = False
 
-    def __name_scroll(self, s):
-        if self.__scroll_dir is None:
-            self.__scroll_dir = 0
-            self.__scroll_offs = 0
-        return s[
-            self.__scroll_offs:self._width + self.__scroll_offs
-        ].ljust(self._width)
+    def need_scroller(self, value):
+        """
+        Allows to control the scroller
+        Parameters:
+            value (bool, None): True  - inc. scroll pos. on next update
+                                False - hold scroll pos.
+                                None  - reset the scroller
+        """
+        self.__scroll_request_pending = value
+
+    def __slice_name(self, name, index):
+        chunks = []
+        for i, text in enumerate(re.split(r'(\~.*?\~)', name)):
+            if i & 1 == 0:  # text
+                chunks += text
+            else:  # glyph placeholder
+                chunks.append(text)
+        return "".join(chunks[index:])
 
     def render_name(self, selected=False):
-        s = str(self._name())
-        # scroller
-        if self._width > 0:
-            self.__scroll_diff = len(s) - self._width
-            if (selected and self._scroll is True and self.is_scrollable()
-                    and self.__scroll_diff > 0):
-                s = self.__name_scroll(s)
-            else:
-                self.__clear_scroll()
-                s = s[:self._width].ljust(self._width)
+        name = str(self._render_name())
+        if selected and self.__scroll_pos is not None:
+            name = self.__slice_name(name, self.__scroll_pos)
         else:
-            self.__clear_scroll()
-        # add cursors
-        if selected and not self.is_editing():
-            s = self.cursor + s
-        elif selected and self.is_editing():
-            s = '*' + s
-        else:
-            s = ' ' + s
-        return s
+            self.__reset_scroller()
+        return name
 
     def get_ns(self, name='.'):
         name = str(name).strip()
@@ -194,9 +182,21 @@ class MenuElement(object):
             "%s:%s" % (self.get_ns(), str(event)), *args)
 
     def get_script(self, name):
-        if name in self._script_tpls:
-            return self._script_tpls[name]
+        if name in self._scripts:
+            return self._scripts[name]
         return None
+
+    def _run_script(self, name, context):
+        _render = getattr(self._scripts[name], 'render', None)
+        # check template
+        if _render is not None and callable(_render):
+            return _render(context)
+        # check callback
+        elif callable(self._scripts[name]):
+            return self._scripts[name](self, context)
+        # check static string
+        elif isinstance(self._scripts[name], str):
+            return self._scripts[name]
 
     def run_script(self, name, **kwargs):
         event = kwargs.get('event', None)
@@ -204,12 +204,12 @@ class MenuElement(object):
         render_only = kwargs.get('render_only', False)
         result = ""
         # init context
-        context = self.get_context(context)
-        if name in self._script_tpls:
+        if name in self._scripts:
+            context = self.get_context(context)
             context['menu'].update({
                 'event': event or name
             })
-            result = self._script_tpls[name].render(context)
+            result = self._run_script(name, context)
         if not render_only:
             # run result as gcode
             self.manager.queue_gcode(result)
@@ -223,10 +223,6 @@ class MenuElement(object):
     def cursor(self):
         return str(self._cursor)[:1]
 
-    @cursor.setter
-    def cursor(self, value):
-        self._cursor = str(value)[:1]
-
     @property
     def manager(self):
         return self._manager
@@ -238,12 +234,13 @@ class MenuElement(object):
 
 class MenuContainer(MenuElement):
     """Menu container abstract class"""
-    def __init__(self, manager, config):
+    def __init__(self, manager, config, **kwargs):
         if type(self) is MenuContainer:
             raise error(
                 'Abstract MenuContainer cannot be instantiated directly')
-        super(MenuContainer, self).__init__(manager, config)
-        self.cursor = '>'
+        super(MenuContainer, self).__init__(manager, config, **kwargs)
+        self._populate_cb = kwargs.get('populate', None)
+        self._cursor = '>'
         self.__selected = None
         self._allitems = []
         self._names = []
@@ -342,6 +339,9 @@ class MenuContainer(MenuElement):
             self._insert_item(name)
         # populate successor items
         self._populate()
+        # run populate callback
+        if self._populate_cb is not None and callable(self._populate_cb):
+            self._populate_cb(self)
         # send populate event
         self.send_event('populate', self)
 
@@ -397,8 +397,8 @@ class MenuContainer(MenuElement):
         return self.select_at(index)
 
     # override
-    def render_container(self, nrows, eventtime):
-        return []
+    def draw_container(self, nrows, eventtime):
+        pass
 
     def __iter__(self):
         return iter(self._items)
@@ -414,22 +414,41 @@ class MenuContainer(MenuElement):
         return self.__selected
 
 
+class MenuDisabled(MenuElement):
+    def __init__(self, manager, config, **kwargs):
+        super(MenuDisabled, self).__init__(manager, config, name='')
+
+    def is_enabled(self):
+        return False
+
+
 class MenuCommand(MenuElement):
-    def __init__(self, manager, config):
-        super(MenuCommand, self).__init__(manager, config)
-        self._load_scripts(config, 'gcode')
+    def __init__(self, manager, config, **kwargs):
+        super(MenuCommand, self).__init__(manager, config, **kwargs)
+        self._load_script(config or kwargs, 'gcode')
 
 
 class MenuInput(MenuCommand):
-    def __init__(self, manager, config,):
-        super(MenuInput, self).__init__(manager, config)
-        self._realtime = manager.asbool(config.get('realtime', 'false'))
-        self._input_tpl = manager.gcode_macro.load_template(config, 'input')
-        self._input_min_tpl = manager.gcode_macro.load_template(
-            config, 'input_min', '-999999.0')
-        self._input_max_tpl = manager.gcode_macro.load_template(
-            config, 'input_max', '999999.0')
-        self._input_step = config.getfloat('input_step', above=0.)
+    def __init__(self, manager, config, **kwargs):
+        super(MenuInput, self).__init__(manager, config, **kwargs)
+        # set class defaults and attributes from arguments
+        self._input = kwargs.get('input', None)
+        self._input_min = kwargs.get('input_min', -999999.0)
+        self._input_max = kwargs.get('input_max', 999999.0)
+        self._input_step = kwargs.get('input_step', 1.0)
+        self._realtime = kwargs.get('realtime', False)
+        self._input_tpl = self._input_min_tpl = self._input_max_tpl = None
+        if config is not None:
+            # overwrite class attributes from config
+            self._realtime = config.getboolean('realtime', self._realtime)
+            self._input_tpl = manager.gcode_macro.load_template(
+                config, 'input')
+            self._input_min_tpl = manager.gcode_macro.load_template(
+                config, 'input_min', str(self._input_min))
+            self._input_max_tpl = manager.gcode_macro.load_template(
+                config, 'input_max', str(self._input_max))
+            self._input_step = config.getfloat(
+                'input_step', self._input_step, above=0.)
 
     def init(self):
         super(MenuInput, self).init()
@@ -466,44 +485,56 @@ class MenuInput(MenuCommand):
 
     def get_context(self, cxt=None):
         context = super(MenuInput, self).get_context(cxt)
+        value = (self._eval_value(context) if self._input_value is None
+                 else self._input_value)
         context['menu'].update({
-            'input': self.manager.asfloat(
-                self._eval_value() if self._input_value is None
-                else self._input_value)
+            'input': value
         })
         return context
 
-    def eval_enable(self):
+    def is_enabled(self):
         context = super(MenuInput, self).get_context()
-        return self.manager.asbool(self._enable_tpl.render(context))
+        return self.eval_enable(context)
 
-    def _eval_min(self):
-        context = super(MenuInput, self).get_context()
-        return self._input_min_tpl.render(context)
+    def _eval_min(self, context):
+        try:
+            if self._input_min_tpl is not None:
+                return float(ast.literal_eval(
+                    self._input_min_tpl.render(context)))
+            return float(self._input_min)
+        except ValueError:
+            logging.exception("Input min value evaluation error")
 
-    def _eval_max(self):
-        context = super(MenuInput, self).get_context()
-        return self._input_max_tpl.render(context)
+    def _eval_max(self, context):
+        try:
+            if self._input_max_tpl is not None:
+                return float(ast.literal_eval(
+                    self._input_max_tpl.render(context)))
+            return float(self._input_max)
+        except ValueError:
+            logging.exception("Input max value evaluation error")
 
-    def _eval_value(self):
-        context = super(MenuInput, self).get_context()
-        return self._input_tpl.render(context)
+    def _eval_value(self, context):
+        try:
+            if self._input_tpl is not None:
+                return float(ast.literal_eval(
+                    self._input_tpl.render(context)))
+            return float(self._input)
+        except ValueError:
+            logging.exception("Input value evaluation error")
 
     def _value_changed(self):
         self.__last_change = self._last_heartbeat
         self._is_dirty = True
 
     def _init_value(self):
+        context = super(MenuInput, self).get_context()
         self._input_value = None
-        self._input_min = self.manager.asfloat(self._eval_min())
-        self._input_max = self.manager.asfloat(self._eval_max())
-        value = self._eval_value()
-        if self.manager.isfloat(value):
-            self._input_value = min(self._input_max, max(
-                self._input_min, self.manager.asfloat(value)))
-            self._value_changed()
-        else:
-            logging.error("Cannot init input value")
+        self._input_min = self._eval_min(context)
+        self._input_max = self._eval_max(context)
+        self._input_value = min(self._input_max, max(
+            self._input_min, self._eval_value(context)))
+        self._value_changed()
 
     def _reset_value(self):
         self._input_value = None
@@ -548,15 +579,15 @@ class MenuInput(MenuCommand):
 
 
 class MenuList(MenuContainer):
-    def __init__(self, manager, config):
-        super(MenuList, self).__init__(manager, config)
+    def __init__(self, manager, config, **kwargs):
+        super(MenuList, self).__init__(manager, config, **kwargs)
         self._viewport_top = 0
+
+        def _cb(el, context):
+            el.manager.back()
         # create back item
-        self._itemBack = self.manager.menuitem_from({
-            'type': 'command',
-            'name': '..',
-            'gcode': '{menu.back()}'
-        })
+        self._itemBack = self.manager.menuitem_from(
+            'command', name='..', gcode=_cb)
 
     def _names_aslist(self):
         return self.manager.lookup_children(self.get_ns())
@@ -567,9 +598,8 @@ class MenuList(MenuContainer):
         #  add back as first item
         self.insert_item(self._itemBack, 0)
 
-    def render_container(self, nrows, eventtime):
-        manager = self.manager
-        lines = []
+    def draw_container(self, nrows, eventtime):
+        display = self.manager.display
         selected_row = self.selected
         # adjust viewport
         if selected_row is not None:
@@ -582,29 +612,56 @@ class MenuList(MenuContainer):
         # clamps viewport
         self._viewport_top = max(0, min(self._viewport_top, len(self) - nrows))
         try:
+            y = 0
             for row in range(self._viewport_top, self._viewport_top + nrows):
-                s = ""
+                text = ""
+                prefix = ""
+                suffix = ""
                 if row < len(self):
                     current = self[row]
                     selected = (row == selected_row)
                     if selected:
                         current.heartbeat(eventtime)
-                    name = manager.stripliterals(
-                        manager.aslatin(current.render_name(selected)))
-                    if isinstance(current, MenuList):
-                        s += name[:manager.cols-1].ljust(manager.cols-1)
-                        s += '>'
+                    text = current.render_name(selected)
+                    # add prefix (selection indicator)
+                    if selected and not current.is_editing():
+                        prefix = current.cursor
+                    elif selected and current.is_editing():
+                        prefix = '*'
                     else:
-                        s += name
-                lines.append(s[:manager.cols].ljust(manager.cols))
+                        prefix = ' '
+                    # add suffix (folder indicator)
+                    if isinstance(current, MenuList):
+                        suffix += '>'
+                # draw to display
+                plen = len(prefix)
+                slen = len(suffix)
+                width = self.manager.cols - plen - slen
+                # draw item prefix (cursor)
+                ppos = display.draw_text(y, 0, prefix, eventtime)
+                # draw item name
+                tpos = display.draw_text(y, ppos, text.ljust(width), eventtime)
+                # check scroller
+                if (selected and tpos > self.manager.cols
+                        and current.is_scrollable()):
+                    # scroll next
+                    current.need_scroller(True)
+                else:
+                    # reset scroller
+                    current.need_scroller(None)
+                # draw item suffix
+                if suffix:
+                    display.draw_text(
+                        y, self.manager.cols - slen, suffix, eventtime)
+                # next display row
+                y += 1
         except Exception:
-            logging.exception('List rendering error')
-        return lines
+            logging.exception('List drawing error')
 
 
 class MenuVSDList(MenuList):
-    def __init__(self, manager, config):
-        super(MenuVSDList, self).__init__(manager, config)
+    def __init__(self, manager, config, **kwargs):
+        super(MenuVSDList, self).__init__(manager, config, **kwargs)
 
     def _populate(self):
         super(MenuVSDList, self)._populate()
@@ -612,17 +669,12 @@ class MenuVSDList(MenuList):
         if sdcard is not None:
             files = sdcard.get_file_list()
             for fname, fsize in files:
-                gcode = [
-                    'M23 /%s' % str(fname)
-                ]
-                self.insert_item(self.manager.menuitem_from({
-                    'type': 'command',
-                    'name': self.manager.asliteral(fname),
-                    'gcode': "\n".join(gcode)
-                }))
+                self.insert_item(self.manager.menuitem_from(
+                    'command', name=repr(fname), gcode='M23 /%s' % str(fname)))
 
 
 menu_items = {
+    'disabled': MenuDisabled,
     'command': MenuCommand,
     'input': MenuInput,
     'list': MenuList,
@@ -787,21 +839,16 @@ class MenuManager:
             container = self.menustack[self.stack_size() - lvl - 1]
         return container
 
-    def render(self, eventtime):
-        lines = []
-        self.update_context(eventtime)
-        container = self.stack_peek()
-        if self.running and isinstance(container, MenuContainer):
-            container.heartbeat(eventtime)
-            lines = container.render_container(self.rows, eventtime)
-        return lines
-
     def screen_update_event(self, eventtime):
         # screen update
         if not self.is_running():
             return False
-        for y, line in enumerate(self.render(eventtime)):
-            self.display.draw_text(y, 0, line, eventtime)
+        # draw menu
+        self.update_context(eventtime)
+        container = self.stack_peek()
+        if self.running and isinstance(container, MenuContainer):
+            container.heartbeat(eventtime)
+            container.draw_container(self.rows, eventtime)
         return True
 
     def up(self, fast_rate=False):
@@ -911,11 +958,11 @@ class MenuManager:
                 logging.exception("Script running error")
             self.gcode_queue.pop(0)
 
-    def menuitem_from(self, config):
-        if isinstance(config, dict):
-            config = MenuConfig(dict(config))
-        return self.aschoice(
-            config, 'type', menu_items)(self, config)
+    def menuitem_from(self, type, **kwargs):
+        if type not in menu_items:
+            raise error("Choice '%s' for option '%s'"
+                        " is not a valid choice" % (type, menu_items))
+        return menu_items[type](self, None, **kwargs)
 
     def add_menuitem(self, name, item):
         existing_item = False
@@ -964,7 +1011,11 @@ class MenuManager:
 
     def load_menuitems(self, config):
         for cfg in config.get_prefix_sections('menu '):
-            item = self.menuitem_from(cfg)
+            type = cfg.get('type')
+            if type not in menu_items:
+                raise error("Choice '%s' for option '%s'"
+                            " is not a valid choice" % (type, menu_items))
+            item = menu_items[type](self, cfg)
             self.add_menuitem(item.get_ns(), item)
 
     def _click_callback(self, eventtime, event):
@@ -1003,11 +1054,6 @@ class MenuManager:
         return s
 
     @classmethod
-    def asliteral(cls, s):
-        """Enclose text by the single quotes"""
-        return "'" + str(s) + "'"
-
-    @classmethod
     def aslatin(cls, s):
         if isinstance(s, str):
             return s
@@ -1017,98 +1063,5 @@ class MenuManager:
             return str(s)
 
     @classmethod
-    def asflatline(cls, s):
-        return ''.join(cls.aslatin(s).splitlines())
-
-    @classmethod
     def asflat(cls, s):
-        return cls.stripliterals(cls.asflatline(s))
-
-    @classmethod
-    def asbool(cls, s):
-        if isinstance(s, (bool, int, float)):
-            return bool(s)
-        elif cls.isfloat(s):
-            return bool(cls.asfloat(s))
-        s = str(s).strip()
-        return s.lower() in ('y', 'yes', 't', 'true', 'on', '1')
-
-    @classmethod
-    def asint(cls, s, default=sentinel):
-        if isinstance(s, (int, float)):
-            return int(s)
-        s = str(s).strip()
-        prefix = s[0:2]
-        try:
-            if prefix == '0x':
-                return int(s, 16)
-            elif prefix == '0b':
-                return int(s, 2)
-            else:
-                return int(float(s))
-        except ValueError as e:
-            if default is not sentinel:
-                return default
-            raise e
-
-    @classmethod
-    def asfloat(cls, s, default=sentinel):
-        if isinstance(s, (int, float)):
-            return float(s)
-        s = str(s).strip()
-        try:
-            return float(s)
-        except ValueError as e:
-            if default is not sentinel:
-                return default
-            raise e
-
-    @classmethod
-    def isfloat(cls, value):
-        try:
-            float(value)
-            return True
-        except ValueError:
-            return False
-
-    @classmethod
-    def lines_aslist(cls, value, default=[]):
-        if isinstance(value, str):
-            value = filter(None, [x.strip() for x in value.splitlines()])
-        try:
-            return list(value)
-        except Exception:
-            logging.exception("Lines as list parsing error")
-            return list(default)
-
-    @classmethod
-    def words_aslist(cls, value, sep=',', default=[]):
-        if isinstance(value, str):
-            value = filter(None, [x.strip() for x in value.split(sep)])
-        try:
-            return list(value)
-        except Exception:
-            logging.exception("Words as list parsing error")
-            return list(default)
-
-    @classmethod
-    def aslist(cls, value, flatten=True, default=[]):
-        values = cls.lines_aslist(value)
-        if not flatten:
-            return values
-        result = []
-        for value in values:
-            subvalues = cls.words_aslist(value, sep=',')
-            result.extend(subvalues)
-        return result
-
-    @classmethod
-    def aschoice(cls, config, option, choices, default=sentinel):
-        if default is not sentinel:
-            c = config.get(option, default)
-        else:
-            c = config.get(option)
-        if c not in choices:
-            raise error("Choice '%s' for option '%s'"
-                        " is not a valid choice" % (c, option))
-        return choices[c]
+        return cls.stripliterals(''.join(cls.aslatin(s).splitlines()))

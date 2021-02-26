@@ -1,6 +1,6 @@
 # Interface to Klipper micro-controller code
 #
-# Copyright (C) 2016-2020  Kevin O'Connor <kevin@koconnor.net>
+# Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, zlib, logging, math
@@ -143,25 +143,24 @@ class MCU_digital_out:
             self._mcu.add_config_cmd("set_digital_out pin=%s value=%d"
                                      % (self._pin, self._start_value))
             return
+        self._mcu.request_move_queue_slot()
         self._oid = self._mcu.create_oid()
         self._mcu.add_config_cmd(
             "config_digital_out oid=%d pin=%s value=%d default_value=%d"
-            " max_duration=%d" % (
-                self._oid, self._pin, self._start_value, self._shutdown_value,
-                self._mcu.seconds_to_clock(self._max_duration)))
+            " max_duration=%d"
+            % (self._oid, self._pin, self._start_value, self._shutdown_value,
+               self._mcu.seconds_to_clock(self._max_duration)))
         self._mcu.add_config_cmd("update_digital_out oid=%d value=%d"
                                  % (self._oid, self._start_value),
                                  on_restart=True)
         cmd_queue = self._mcu.alloc_command_queue()
         self._set_cmd = self._mcu.lookup_command(
-            "schedule_digital_out oid=%c clock=%u value=%c", cq=cmd_queue)
+            "queue_digital_out oid=%c clock=%u on_ticks=%u", cq=cmd_queue)
     def set_digital(self, print_time, value):
         clock = self._mcu.print_time_to_clock(print_time)
         self._set_cmd.send([self._oid, clock, (not not value) ^ self._invert],
                            minclock=self._last_clock, reqclock=clock)
         self._last_clock = clock
-    def set_pwm(self, print_time, value, cycle_time=None):
-        self.set_digital(print_time, value >= 0.5)
 
 class MCU_pwm:
     def __init__(self, mcu, pin_params):
@@ -175,9 +174,9 @@ class MCU_pwm:
         self._invert = pin_params['invert']
         self._start_value = self._shutdown_value = float(self._invert)
         self._is_static = False
-        self._last_clock = 0
+        self._last_clock = self._last_cycle_ticks = 0
         self._pwm_max = 0.
-        self._set_cmd = None
+        self._set_cmd = self._set_cycle_ticks = None
     def get_mcu(self):
         return self._mcu
     def setup_max_duration(self, max_duration):
@@ -208,6 +207,7 @@ class MCU_pwm:
                     % (self._pin, cycle_ticks,
                        self._start_value * self._pwm_max))
                 return
+            self._mcu.request_move_queue_slot()
             self._oid = self._mcu.create_oid()
             self._mcu.add_config_cmd(
                 "config_pwm_out oid=%d pin=%s cycle_ticks=%d value=%d"
@@ -217,35 +217,39 @@ class MCU_pwm:
                    self._shutdown_value * self._pwm_max,
                    self._mcu.seconds_to_clock(self._max_duration)))
             svalue = int(self._start_value * self._pwm_max + 0.5)
-            self._mcu.add_config_cmd("schedule_pwm_out oid=%d clock=%d value=%d"
+            self._mcu.add_config_cmd("queue_pwm_out oid=%d clock=%d value=%d"
                                      % (self._oid, self._last_clock, svalue),
                                      on_restart=True)
             self._set_cmd = self._mcu.lookup_command(
-                "schedule_pwm_out oid=%c clock=%u value=%hu", cq=cmd_queue)
+                "queue_pwm_out oid=%c clock=%u value=%hu", cq=cmd_queue)
             return
         # Software PWM
         if self._shutdown_value not in [0., 1.]:
             raise pins.error("shutdown value must be 0.0 or 1.0 on soft pwm")
-        self._pwm_max = float(cycle_ticks)
         if self._is_static:
             self._mcu.add_config_cmd("set_digital_out pin=%s value=%d"
                                      % (self._pin, self._start_value >= 0.5))
             return
+        self._mcu.request_move_queue_slot()
         self._oid = self._mcu.create_oid()
         self._mcu.add_config_cmd(
-            "config_soft_pwm_out oid=%d pin=%s value=%d"
+            "config_digital_out oid=%d pin=%s value=%d"
             " default_value=%d max_duration=%d"
             % (self._oid, self._pin, self._start_value >= 1.0,
                self._shutdown_value >= 0.5,
                self._mcu.seconds_to_clock(self._max_duration)))
-        svalue = int(self._start_value * self._pwm_max + 0.5)
         self._mcu.add_config_cmd(
-            "schedule_soft_pwm_out oid=%d clock=%d on_ticks=%d off_ticks=%d"
-            % (self._oid, self._last_clock, svalue, cycle_ticks - svalue),
-            is_init=True)
+            "set_digital_out_pwm_cycle oid=%d cycle_ticks=%d"
+            % (self._oid, cycle_ticks))
+        self._last_cycle_ticks = cycle_ticks
+        svalue = int(self._start_value * cycle_ticks + 0.5)
+        self._mcu.add_config_cmd(
+            "queue_digital_out oid=%d clock=%d on_ticks=%d"
+            % (self._oid, self._last_clock, svalue), is_init=True)
         self._set_cmd = self._mcu.lookup_command(
-            "schedule_soft_pwm_out oid=%c clock=%u on_ticks=%u off_ticks=%u",
-            cq=cmd_queue)
+            "queue_digital_out oid=%c clock=%u on_ticks=%u", cq=cmd_queue)
+        self._set_cycle_ticks = self._mcu.lookup_command(
+            "set_digital_out_pwm_cycle oid=%c cycle_ticks=%u", cq=cmd_queue)
     def set_pwm(self, print_time, value, cycle_time=None):
         clock = self._mcu.print_time_to_clock(print_time)
         minclock = self._last_clock
@@ -261,8 +265,12 @@ class MCU_pwm:
         if cycle_time is None:
             cycle_time = self._cycle_time
         cycle_ticks = self._mcu.seconds_to_clock(cycle_time)
+        if cycle_ticks != self._last_cycle_ticks:
+            self._set_cycle_ticks.send([self._oid, cycle_ticks],
+                                       minclock=minclock, reqclock=clock)
+            self._last_cycle_ticks = cycle_ticks
         on_ticks = int(max(0., min(1., value)) * float(cycle_ticks) + 0.5)
-        self._set_cmd.send([self._oid, clock, on_ticks, cycle_ticks - on_ticks],
+        self._set_cmd.send([self._oid, clock, on_ticks],
                            minclock=minclock, reqclock=clock)
 
 class MCU_adc:
@@ -435,9 +443,11 @@ class MCU:
         ffi_main, self._ffi_lib = chelper.get_ffi()
         self._max_stepper_error = config.getfloat('max_stepper_error', 0.000025,
                                                   minval=0.)
+        self._reserved_move_slots = 0
         self._stepqueues = []
         self._steppersync = None
         # Stats
+        self._get_status_info = {}
         self._stats_sumsq_base = 0.
         self._mcu_tick_avg = 0.
         self._mcu_tick_stddev = 0.
@@ -554,10 +564,11 @@ class MCU:
         return config_params
     def _log_info(self):
         msgparser = self._serial.get_msgparser()
+        message_count = len(msgparser.get_messages())
+        version, build_versions = msgparser.get_version_info()
         log_info = [
-            "Loaded MCU '%s' %d commands (%s / %s)" % (
-                self._name, len(msgparser.messages_by_id),
-                msgparser.version, msgparser.build_versions),
+            "Loaded MCU '%s' %d commands (%s / %s)"
+            % (self._name, message_count, version, build_versions),
             "MCU '%s' config: %s" % (self._name, " ".join(
                 ["%s=%s" % (k, v) for k, v in self.get_constants().items()]))]
         return "\n".join(log_info)
@@ -581,11 +592,13 @@ class MCU:
             self._send_config(config_params['crc'])
         # Setup steppersync with the move_count returned by get_config
         move_count = config_params['move_count']
+        if move_count < self._reserved_move_slots:
+            raise error("Too few moves available on MCU '%s'" % (self._name,))
         ffi_main, ffi_lib = chelper.get_ffi()
         self._steppersync = ffi_main.gc(
             ffi_lib.steppersync_alloc(self._serial.serialqueue,
                                       self._stepqueues, len(self._stepqueues),
-                                      move_count),
+                                      move_count-self._reserved_move_slots),
             ffi_lib.steppersync_free)
         ffi_lib.steppersync_set_time(self._steppersync, 0., self._mcu_freq)
         # Log config information
@@ -619,9 +632,14 @@ class MCU:
         self._reset_cmd = self.try_lookup_command("reset")
         self._config_reset_cmd = self.try_lookup_command("config_reset")
         ext_only = self._reset_cmd is None and self._config_reset_cmd is None
-        mbaud = self._serial.get_msgparser().get_constant('SERIAL_BAUD', None)
+        msgparser = self._serial.get_msgparser()
+        mbaud = msgparser.get_constant('SERIAL_BAUD', None)
         if self._restart_method is None and mbaud is None and not ext_only:
             self._restart_method = 'command'
+        version, build_versions = msgparser.get_version_info()
+        self._get_status_info['mcu_version'] = version
+        self._get_status_info['mcu_build_versions'] = build_versions
+        self._get_status_info['mcu_constants'] = msgparser.get_constants()
         self.register_response(self._handle_shutdown, 'shutdown')
         self.register_response(self._handle_shutdown, 'is_shutdown')
         self.register_response(self._handle_mcu_stats, 'stats')
@@ -650,6 +668,8 @@ class MCU:
         return self.print_time_to_clock(t) + slot
     def register_stepqueue(self, stepqueue):
         self._stepqueues.append(stepqueue)
+    def request_move_queue_slot(self):
+        self._reserved_move_slots += 1
     def seconds_to_clock(self, time):
         return int(time * self._mcu_freq)
     def get_max_stepper_error(self):
@@ -674,8 +694,9 @@ class MCU:
             return self.lookup_command(msgformat)
         except self._serial.get_msgparser().error as e:
             return None
-    def lookup_command_id(self, msgformat):
-        return self._serial.get_msgparser().lookup_command(msgformat).msgid
+    def lookup_command_tag(self, msgformat):
+        all_msgs = self._serial.get_msgparser().get_messages()
+        return {fmt: msgtag for msgtag, msgtype, fmt in all_msgs}[msgformat]
     def get_enumerations(self):
         return self._serial.get_msgparser().get_enumerations()
     def get_constants(self):
@@ -769,12 +790,17 @@ class MCU:
                      self._name, eventtime)
         self._printer.invoke_shutdown("Lost communication with MCU '%s'" % (
             self._name,))
+    def get_status(self, eventtime):
+        return dict(self._get_status_info)
     def stats(self, eventtime):
-        msg = "%s: mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f" % (
-            self._name, self._mcu_tick_awake, self._mcu_tick_avg,
-            self._mcu_tick_stddev)
-        return False, ' '.join([msg, self._serial.stats(eventtime),
-                                self._clocksync.stats(eventtime)])
+        load = "mcu_awake=%.03f mcu_task_avg=%.06f mcu_task_stddev=%.06f" % (
+            self._mcu_tick_awake, self._mcu_tick_avg, self._mcu_tick_stddev)
+        stats = ' '.join([load, self._serial.stats(eventtime),
+                          self._clocksync.stats(eventtime)])
+        parts = [s.split('=', 1) for s in stats.split()]
+        last_stats = {k:(float(v) if '.' in v else int(v)) for k, v in parts}
+        self._get_status_info['last_stats'] = last_stats
+        return False, '%s: %s' % (self._name, stats)
 
 Common_MCU_errors = {
     ("Timer too close", "No next step", "Missed scheduling of next "): """

@@ -145,7 +145,7 @@ class MAX31856(SensorBase):
         return temp
     def calc_adc(self, temp):
         adc = int( ( temp / MAX31856_MULT ) + 0.5 ) # convert to ADC value
-        adc = adc << MAX31856_SCALE
+        adc = max(0, min(0x3FFFF, adc)) << MAX31856_SCALE
         return adc
     def build_spi_init(self, config):
         cmds = []
@@ -174,12 +174,10 @@ class MAX31856(SensorBase):
             "16" : MAX31856_CR1_AVGSEL16
         }
         value |= config.getchoice('tc_averaging_count', averages, "1")
-        cmds.append(0x80 + MAX31856_CR1_REG)
         cmds.append(value)
 
         value = (MAX31856_MASK_VOLTAGE_UNDER_OVER_FAULT |
                  MAX31856_MASK_THERMOCOUPLE_OPEN_FAULT)
-        cmds.append(0x80 + MAX31856_MASK_REG)
         cmds.append(value)
         return cmds
 
@@ -209,7 +207,7 @@ class MAX31855(SensorBase):
         return temp
     def calc_adc(self, temp):
         adc = int( ( temp / MAX31855_MULT ) + 0.5 ) # convert to ADC value
-        adc = adc << MAX31855_SCALE
+        adc = max(0, min(0x1FFF, adc)) << MAX31855_SCALE
         return adc
 
 
@@ -236,7 +234,7 @@ class MAX6675(SensorBase):
         return temp
     def calc_adc(self, temp):
         adc = int( ( temp / MAX6675_MULT ) + 0.5 ) # convert to ADC value
-        adc = adc << MAX6675_SCALE
+        adc = max(0, min(0x1FFF, adc)) << MAX6675_SCALE
         return adc
 
 
